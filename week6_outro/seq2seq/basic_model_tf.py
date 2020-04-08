@@ -1,5 +1,5 @@
 import tensorflow as tf
-import keras.layers as L
+import tensorflow.keras.layers as L
 
 # This code implements a single-GRU seq2seq model. You will have to improve it later in the assignment.
 # Note 1: when using several recurrent layers TF can mixed up the weights of different recurrent layers.
@@ -12,31 +12,34 @@ import keras.layers as L
 
 
 class BasicTranslationModel:
-    def __init__(self, name, inp_voc, out_voc,
-                 emb_size, hid_size,):
+    def __init__(self, name, inp_voc, out_voc, emb_size, hid_size):
 
         self.name = name
         self.inp_voc = inp_voc
         self.out_voc = out_voc
 
-        with tf.variable_scope(name):
-            self.emb_inp = L.Embedding(len(inp_voc), emb_size)
-            self.emb_out = L.Embedding(len(out_voc), emb_size)
-            self.enc0 = tf.nn.rnn_cell.GRUCell(hid_size)
-            self.dec_start = L.Dense(hid_size)
-            self.dec0 = tf.nn.rnn_cell.GRUCell(hid_size)
-            self.logits = L.Dense(len(out_voc))
+        self.emb_inp = L.Embedding(len(inp_voc), emb_size)
+        self.emb_out = L.Embedding(len(out_voc), emb_size)
+        self.enc0 = L.GRUCell(hid_size)
+        self.dec_start = L.Dense(hid_size)
+        self.dec0 = L.GRUCell(hid_size)
+        self.logits = L.Dense(len(out_voc))
 
-            # run on dummy output to .build all layers (and therefore create
-            # weights)
-            inp = tf.placeholder('int32', [None, None])
-            out = tf.placeholder('int32', [None, None])
-            h0 = self.encode(inp)
-            h1 = self.decode(h0, out[:, 0])
-            # h2 = self.decode(h1,out[:,1]) etc.
+        # run on dummy output to .build all layers (and therefore create
+        # weights)
+        # inp = tf.placeholder('int32', [None, None])
+        # out = tf.placeholder('int32', [None, None])
+        # h0 = self.encode(inp)
+        # h1 = self.decode(h0, out[:, 0])
+        # h2 = self.decode(h1,out[:,1]) etc.
 
-        self.weights = tf.get_collection(
-            tf.GraphKeys.TRAINABLE_VARIABLES, scope=name)
+    def trainable_weights(self):
+        return self.emb_inp.trainable_weights + \
+               self.emb_out.trainable_weights + \
+               self.enc0.trainable_weights + \
+               self.dec_start.trainable_weights + \
+               self.dec0.trainable_weights + \
+               self.logits.trainable_weights
 
     def encode(self, inp, **flags):
         """
@@ -47,10 +50,7 @@ class BasicTranslationModel:
         inp_lengths = infer_length(inp, self.inp_voc.eos_ix)
         inp_emb = self.emb_inp(inp)
 
-        _, enc_last = tf.nn.dynamic_rnn(
-            self.enc0, inp_emb,
-            sequence_length=inp_lengths,
-            dtype=inp_emb.dtype)
+        _, enc_last = L.RNN(self.enc0, return_state=True, dtype=inp_emb.dtype)(inp_emb)
 
         dec_start = self.dec_start(enc_last)
         return [dec_start]
@@ -63,7 +63,7 @@ class BasicTranslationModel:
         :return: a list of next decoder state tensors, a tensor of logits [batch,n_tokens]
         """
 
-        [prev_dec] = prev_state
+        prev_dec = prev_state
 
         prev_emb = self.emb_out(prev_tokens[:, None])[:, 0]
 
@@ -71,7 +71,7 @@ class BasicTranslationModel:
 
         output_logits = self.logits(new_dec_out)
 
-        return [new_dec_state], output_logits
+        return new_dec_state, output_logits
 
     def symbolic_score(self, inp, out, eps=1e-30, **flags):
         """
@@ -89,7 +89,7 @@ class BasicTranslationModel:
 
         batch_size = tf.shape(inp)[0]
         bos = tf.fill([batch_size], self.out_voc.bos_ix)
-        first_logits = tf.log(tf.one_hot(bos, len(self.out_voc)) + eps)
+        first_logits = tf.math.log(tf.one_hot(bos, len(self.out_voc)) + eps)
 
         def step(blob, y_prev):
             h_prev = blob[:-1]
@@ -131,7 +131,7 @@ class BasicTranslationModel:
 
         batch_size = tf.shape(inp)[0]
         bos = tf.fill([batch_size], self.out_voc.bos_ix)
-        first_logits = tf.log(tf.one_hot(bos, len(self.out_voc)) + eps)
+        first_logits = tf.math.log(tf.one_hot(bos, len(self.out_voc)) + eps)
         max_len = tf.reduce_max(tf.shape(inp)[1]) * 2
 
         def step(blob, t):
@@ -139,9 +139,9 @@ class BasicTranslationModel:
             h_new, logits = self.decode(h_prev, y_prev, **flags)
             y_new = (
                 tf.argmax(logits, axis=-1) if greedy
-                else tf.multinomial(logits, 1)[:, 0]
+                else tf.compat.v1.multinomial(logits, 1)[:, 0]
             )
-            return list(h_new) + [logits, tf.cast(y_new, y_prev.dtype)]
+            return h_new + [logits, tf.cast(y_new, y_prev.dtype)]
 
         results = tf.scan(
             step,
@@ -171,28 +171,6 @@ class BasicTranslationModel:
         ]
 
         return out_seq, tf.nn.log_softmax(logits_seq)
-
-
-### Utility functions ###
-
-def initialize_uninitialized(sess=None):
-    """
-    Initialize unitialized variables, doesn't affect those already initialized
-    :param sess: in which session to initialize stuff. Defaults to tf.get_default_session()
-    """
-    sess = sess or tf.get_default_session()
-    global_vars = tf.global_variables()
-    is_not_initialized = sess.run(
-        [tf.is_variable_initialized(var) for var in global_vars]
-    )
-    not_initialized_vars = [
-        v for (v, f)
-        in zip(global_vars, is_not_initialized)
-        if not f
-    ]
-
-    if len(not_initialized_vars):
-        sess.run(tf.variables_initializer(not_initialized_vars))
 
 
 def infer_length(seq, eos_ix, time_major=False, dtype=tf.int32):
@@ -231,7 +209,7 @@ def select_values_over_last_axis(values, indices):
     :param indices: action ids int32[batch,tick]
     :returns: values selected for the given actions: float[batch,tick]
     """
-    assert values.shape.ndims == 3 and indices.shape.ndims == 2
+    assert len(values.shape) == 3 and len(indices.shape) == 2
     batch_size, seq_len = tf.shape(indices)[0], tf.shape(indices)[1]
     batch_i = tf.tile(tf.range(0, batch_size)[:, None], [1, seq_len])
     time_i = tf.tile(tf.range(0, seq_len)[None, :], [batch_size, 1])
